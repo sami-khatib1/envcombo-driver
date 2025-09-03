@@ -1,8 +1,18 @@
 #!/bin/sh
-
 set -e
 
 echo "=== ENV-COMBO Test Script ==="
+
+# 0. Pre-clean: remove modules if already loaded
+if lsmod | grep -q envcombo; then
+    echo "[0] Removing existing envcombo module..."
+    rmmod envcombo || true
+fi
+
+if lsmod | grep -q i2c_envcombo_sim; then
+    echo "[0] Removing existing simulator module..."
+    rmmod i2c_envcombo_sim || true
+fi
 
 # 1. Load simulator
 echo "[1/7] Loading simulator..."
@@ -38,8 +48,8 @@ echo "  Hum  raw=$HUM_RAW, offset=$HUM_OFF, input=$HUM_IN"
 
 # 5. Modify offsets
 echo "[5/7] Modifying offsets..."
-echo 100 > $DEV/in_temp_offset         # +1.00 °C
-echo 4 > $DEV/in_humidityrelative_offset  # +2.0 %RH
+echo 100 > $DEV/in_temp_offset             # +1.00 °C
+echo 4 > $DEV/in_humidityrelative_offset   # +2.0 %RH
 
 # 6. Verify processed values updated
 echo "[6/7] Verifying processed values after offsets..."

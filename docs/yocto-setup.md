@@ -7,7 +7,8 @@ This document explains how to prepare a Yocto/QEMU environment for building and 
 ## Step 0 — Enable sudo
 
 If your Ubuntu user isn’t in sudoers:
-in new terminal:
+
+open new terminal:
 
 ```bash
 su -

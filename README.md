@@ -38,6 +38,7 @@ From the SDK shell:
 ```bash
 cd driver
 make
+cd ..
 ```
 
 This produces `envcombo.ko`.
@@ -50,7 +51,7 @@ The simulator module is provided as a `.zip` file in the repo.
 Unzip it to get `i2c-envcombo-sim.ko`:
 
 ```bash
-unzip simulator/i2c-envcombo-sim.zip
+unzip simulator/i2c-envcombo-sim.zip -d simulator/
 ```
 
 ---

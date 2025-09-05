@@ -95,7 +95,7 @@ In menuconfig, enable the following:
   → `CONFIG_IIO_BUFFER=y`
 
 - Device Drivers → Industrial I/O support → Enable IIO kfifo buffer support  
-  → `CONFIG_IIO_KFIFO_BUF=m`
+  → `CONFIG_IIO_KFIFO_BUF=y`
 
 - Device Drivers → Industrial I/O support → Enable trigger support within IIO  
   → `CONFIG_IIO_TRIGGER=y`
@@ -104,7 +104,13 @@ In menuconfig, enable the following:
   → `CONFIG_IIO_TRIGGERED_BUFFER=y`
 
 - Device Drivers → Industrial I/O support → Hrtimer based trigger  
-  → `CONFIG_IIO_HRTIMER_TRIGGER=m`
+  → `CONFIG_IIO_HRTIMER_TRIGGER=y`
+
+- Device Drivers → Industrial I/O support → Triggers - standalone → High resolution timer trigger 
+  → `CONFIG_IIO_TRIGGER=y`
+
+- Device Drivers → Industrial I/O support → Triggers - standalone → SYSFS trigger 
+  → `CONFIG_IIO_HRTIMER_TRIGGER=y`
 
 Save and exit.
 

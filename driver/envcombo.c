@@ -12,8 +12,19 @@
 //
 // Triggered buffer:
 //   - devm_iio_triggered_buffer_setup()
-//   - Internal iio_trigger + hrtimer -> periodic sampling
-//
+//   - Periodic sampling implemented with an **internal software trigger**
+//     backed by a high-resolution timer (hrtimer).
+//   - The hrtimer callback (`envcombo_timer_cb`) fires at a fixed interval
+//     (default = 1 second), which calls iio_trigger_poll().
+//   - That poll executes the registered pollfunc:
+//       1. store timestamp
+//       2. call our trigger handler to read temp/hum
+//       3. push sample + timestamp into the IIO buffer.
+//   - When the buffer is enabled, hrtimer is started via
+//     envcombo_trigger_set_state(); when disabled, the hrtimer is canceled.
+//   - This makes the device self-triggering without requiring an external
+//     GPIO/interrupt trigger.
+//   - Triggering is set to 100ms in the Driver.
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -49,22 +60,27 @@
 #define ENV_CALIB_TEMP_OFFLSB   0x0E
 #define ENV_CALIB_HUM_OFF       0x0F
 
-/* Driver state */
+// Driver state
+// - Driver state holds everything we need for this sensor instance.
+// - The lock ensures safe I2C access from multiple contexts.
+// - scan_buf is what gets pushed into the IIO buffer (temp + hum).
+// - trig + timer implement the internal self-trigger.
+
 struct envcombo_data {
 	struct i2c_client *client;
 	struct mutex lock;
-
-	/* scan record = temp(s16) + hum(u8 stored in 16 bits) -> 4 bytes */
 	__le16 scan_buf[2];
 
 	/* Internal periodic trigger */
 	struct iio_trigger *trig;
 	struct hrtimer      timer;
-	ktime_t             period;   /* default set in probe (e.g., 100 ms) */
+	ktime_t             period;
 };
 
-/* ===================== I2C helpers ===================== */
+// I2C helpers
 
+// Read two registers (MSB + LSB) and combine into signed 16-bit value
+// Used for temperature and temperature offset.
 static int envcombo_read_s16(struct envcombo_data *st, u8 reg_msb, u8 reg_lsb)
 {
 	int msb, lsb;
@@ -83,6 +99,8 @@ static int envcombo_read_s16(struct envcombo_data *st, u8 reg_msb, u8 reg_lsb)
 	return (s16)((msb << 8) | lsb);
 }
 
+// Write a signed 16-bit value into two registers (MSB + LSB).
+// Called when user updates the temperature offset via sysfs.
 static int envcombo_write_s16(struct envcombo_data *st, u8 reg_msb, u8 reg_lsb, s16 val)
 {
 	int ret;
@@ -136,8 +154,7 @@ static int envcombo_write_s8(struct envcombo_data *st, u8 reg, s8 val)
 	return ret;
 }
 
-/* ===================== Channel wrappers ===================== */
-
+// Simple wrappers around the raw I2C helpers.
 static inline int envcombo_read_temp(struct envcombo_data *st)
 {
 	return envcombo_read_s16(st, ENV_TEMP_MSB, ENV_TEMP_LSB);
@@ -173,15 +190,18 @@ static inline int envcombo_write_hum_offset(struct envcombo_data *st, int val)
 	return envcombo_write_s8(st, ENV_CALIB_HUM_OFF, (s8)val);
 }
 
-/* ===================== IIO read/write ===================== */
-
+// IIO read/write
+// read_raw callback:
+// - read_raw is called whenever user-space reads sysfs attributes
+// - like in_temp_raw, in_temp_offset, in_temp_input, etc.
+// - Depending on 'mask', we return raw data, scale, offset, or processed value.
 static int envcombo_read_raw(struct iio_dev *indio_dev,
 			     const struct iio_chan_spec *chan,
 			     int *val, int *val2, long mask)
 {
 	struct envcombo_data *st = iio_priv(indio_dev);
 	int ret = iio_device_claim_direct_mode(indio_dev);
-	int raw, off;
+	int raw;
 
 	if (ret)
 		return ret;
@@ -201,14 +221,17 @@ static int envcombo_read_raw(struct iio_dev *indio_dev,
 			ret = envcombo_read_temp_offset(st);
 			if (ret >= 0) { *val = ret; ret = IIO_VAL_INT; }
 			break;
-		case IIO_CHAN_INFO_PROCESSED:
-			raw = envcombo_read_temp(st);
-			if (raw < 0) { ret = raw; break; }
-			off = envcombo_read_temp_offset(st);
-			if (off < 0) off = 0;
-			*val = (raw + off) * 10; /* milli-°C */
-			ret = IIO_VAL_INT;
-			break;
+        case IIO_CHAN_INFO_PROCESSED:
+            raw = envcombo_read_temp(st);
+            if (raw < 0) { ret = raw; break; }
+            /* old: sim updates raw return values according to offset
+                   off = envcombo_read_temp_offset(st);
+            *      if (off < 0) off = 0;
+            *      *val = (raw + off) * 10;
+            */
+            *val = raw * 10;   /* raw is already offset-adjusted by hw */
+            ret = IIO_VAL_INT;
+            break;
 		default:
 			ret = -EINVAL;
 		}
@@ -229,13 +252,11 @@ static int envcombo_read_raw(struct iio_dev *indio_dev,
 			if (ret >= 0) { *val = ret; ret = IIO_VAL_INT; }
 			break;
 		case IIO_CHAN_INFO_PROCESSED:
-			raw = envcombo_read_hum(st);
-			if (raw < 0) { ret = raw; break; }
-			off = envcombo_read_hum_offset(st);
-			if (off < 0) off = 0;
-			*val = (raw + off) * 500; /* milli-%RH */
-			ret = IIO_VAL_INT;
-			break;
+            raw = envcombo_read_hum(st);
+            if (raw < 0) { ret = raw; break; }
+            *val = raw * 500;  // raw already includes hw offset
+            ret = IIO_VAL_INT;
+            break;
 		default:
 			ret = -EINVAL;
 		}
@@ -249,6 +270,9 @@ static int envcombo_read_raw(struct iio_dev *indio_dev,
 	return ret;
 }
 
+// write_Raw callback:
+//  - write_raw is called whenever user-space writes to sysfs
+//  - (e.g., to change offset calibration values).
 static int envcombo_write_raw(struct iio_dev *indio_dev,
 			      const struct iio_chan_spec *chan,
 			      int val, int val2, long mask)
@@ -281,7 +305,7 @@ static const struct iio_info envcombo_iio_info = {
 	.write_raw = envcombo_write_raw,
 };
 
-/* ===================== Triggered buffer handler ===================== */
+//Triggered buffer handler
 
 static irqreturn_t envcombo_trigger_handler(int irq, void *p)
 {
@@ -291,27 +315,24 @@ static irqreturn_t envcombo_trigger_handler(int irq, void *p)
 	s16 t;
 	int h;
 
-	/* dev_dbg(&indio_dev->dev, "Trigger fired: temp/hum read\n"); */
-
 	t = envcombo_read_temp(st);
 	h = envcombo_read_hum(st);
 	if (t < 0 || h < 0)
-		goto done; /* drop bad sample */
+		goto done;
 
 	st->scan_buf[0] = cpu_to_le16(t);
 	st->scan_buf[1] = cpu_to_le16((u16)(h & 0xFF));
 
 	iio_push_to_buffers_with_timestamp(indio_dev,
-                                   st->scan_buf,
-                                   ktime_get_boottime_ns());
+                                       st->scan_buf,
+                                       ktime_get_boottime_ns());
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
 	return IRQ_HANDLED;
 }
 
-/* ===================== Channels ===================== */
-
+// Channels
 enum { ENV_CH_TEMP = 0, ENV_CH_HUM = 1 };
 
 static const struct iio_chan_spec envcombo_channels[] = {
@@ -346,20 +367,24 @@ static const struct iio_chan_spec envcombo_channels[] = {
 	},
 };
 
-/* ===================== Internal trigger ops ===================== */
-
+// Internal trigger ops
+// hrtimer callback: runs periodically at configured 'period'.
+// Each time it fires, we poll the trigger to collect a new sample.
+// mechanism which makes the device "self-sampling".
 static enum hrtimer_restart envcombo_timer_cb(struct hrtimer *t)
 {
 	struct envcombo_data *st = container_of(t, struct envcombo_data, timer);
 
-	/* Fire the trigger: causes pollfunc (store_time + handler) to run */
 	iio_trigger_poll(st->trig);
 
-	/* Re-arm for periodic firing */
 	hrtimer_forward_now(&st->timer, st->period);
-	return HRTIMER_RESTART;
+	
+    return HRTIMER_RESTART;
 }
 
+// Called by the IIO core when buffer is enabled/disabled.
+// If enabled, we start the hrtimer so sampling begins.
+// If disabled, we cancel the hrtimer so device goes idle.
 static int envcombo_trigger_set_state(struct iio_trigger *trig, bool state)
 {
 	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
@@ -380,8 +405,12 @@ static const struct iio_trigger_ops envcombo_trigger_ops = {
 	.validate_device   = iio_trigger_validate_own_device,
 };
 
-/* ===================== Probe / Remove ===================== */
+// Probe / Remove
 
+// Probe: runs when the I2C device is created.
+// verify WHO_AM_I, allocate the IIO device,
+// setup channels, allocate + register the trigger, and
+// finally register the IIO device with the core.
 static int envcombo_probe(struct i2c_client *client,
 			  const struct i2c_device_id *id)
 {
@@ -418,10 +447,10 @@ static int envcombo_probe(struct i2c_client *client,
 	indio_dev->name         = "envcombo";
 	indio_dev->modes        = INDIO_DIRECT_MODE | INDIO_BUFFER_TRIGGERED;
 
-	/* Make indio_dev retrievable in .remove() */
+	// Make indio_dev retrievable in .remove()
 	i2c_set_clientdata(client, indio_dev);
 
-	/* Allocate + register internal trigger */
+	// Allocate + register internal trigger
 	st->trig = devm_iio_trigger_alloc(&client->dev, "%s-trigger",
 					  indio_dev->name);
 	if (!st->trig)
@@ -436,15 +465,12 @@ static int envcombo_probe(struct i2c_client *client,
 		return ret;
 	}
 
-	/* Set default period and init timer (e.g., 100 ms = 10 Hz) */
-	st->period = ms_to_ktime(1000);  // 1 second period
+	// Set default period and init timer (e.g., 100 ms = 10 Hz)
+	st->period = ms_to_ktime(1500);  // 1 second period
 	hrtimer_init(&st->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	st->timer.function = envcombo_timer_cb;
 
-	/* Bind this trigger to the device (becomes current_trigger by default) */
-	//indio_dev->trig = st->trig;
-
-	/* Triggered buffer (kfifo default) */
+	// Triggered buffer
 	ret = devm_iio_triggered_buffer_setup(&client->dev, indio_dev,
 					      iio_pollfunc_store_time,
 					      envcombo_trigger_handler,
@@ -461,6 +487,9 @@ static int envcombo_probe(struct i2c_client *client,
 	return ret;
 }
 
+// Remove: runs when the driver is unloaded or device is deleted.
+// only need to stop the timer. devm_* manages resources ->
+// will clean up everything else automatically.
 static int envcombo_remove(struct i2c_client *client)
 {
     struct iio_dev *indio_dev = i2c_get_clientdata(client);
@@ -468,7 +497,6 @@ static int envcombo_remove(struct i2c_client *client)
 
     dev_info(&client->dev, "envcombo removed\n");
 
-    /* Only stop what we explicitly started */
     hrtimer_cancel(&st->timer);
 
     return 0;
@@ -491,6 +519,6 @@ static struct i2c_driver envcombo_driver = {
 };
 module_i2c_driver(envcombo_driver);
 
-MODULE_AUTHOR("Sami Khatib");
+MODULE_AUTHOR("Sami Khatib <sami.khalid.khatib@gmail.com>");
 MODULE_DESCRIPTION("ENV-COMBO Temp/Humidity IIO driver with periodic internal trigger");
 MODULE_LICENSE("GPL");

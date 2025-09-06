@@ -20,5 +20,5 @@ for i in $(seq 1 $SAMPLES); do
         cmd | getline dec; close(cmd);
         printf "Temp=%6.2f °C  Hum=%5.2f %%RH  TS=%s\n", temp, hum, dec;
     }'
-    sleep 5
+    sleep 1.5
 done

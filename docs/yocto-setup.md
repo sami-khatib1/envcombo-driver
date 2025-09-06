@@ -158,6 +158,8 @@ ls /sys/bus/iio/
 ## Step 8 — Generate cross-compile SDK (⚠️ in a separate shell, not QEMU)
 
 ```bash
+cd ~/poky
+source oe-init-build-env build-qemuarm64
 cd ~/poky/build-qemuarm64
 bitbake -c populate_sdk core-image-minimal
 ls tmp/deploy/sdk/

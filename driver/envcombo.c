@@ -125,6 +125,22 @@ out:
 	return ret;
 }
 
+/* --- Unsigned 8-bit reader for RAW humidity --- */
+static int envcombo_read_u8(struct envcombo_data *st, u8 reg)
+{
+    int v;
+
+    mutex_lock(&st->lock);
+    v = i2c_smbus_read_byte_data(st->client, reg);
+    mutex_unlock(&st->lock);
+
+    if (v < 0) {
+        dev_err(&st->client->dev, "read u8 0x%02x failed (%d)\n", reg, v);
+        return v;
+    }
+    return v & 0xFF;
+}
+
 static int envcombo_read_s8(struct envcombo_data *st, u8 reg)
 {
 	int v;
@@ -162,8 +178,7 @@ static inline int envcombo_read_temp(struct envcombo_data *st)
 
 static inline int envcombo_read_hum(struct envcombo_data *st)
 {
-	int v = envcombo_read_s8(st, ENV_HUM_OUT);
-	return (v < 0) ? v : (v & 0xFF);
+	return envcombo_read_u8(st, ENV_HUM_OUT);
 }
 
 static inline int envcombo_read_temp_offset(struct envcombo_data *st)
@@ -241,6 +256,7 @@ static int envcombo_read_raw(struct iio_dev *indio_dev,
 		switch (mask) {
 		case IIO_CHAN_INFO_RAW:
 			ret = envcombo_read_hum(st);
+			if (ret < 0) printk(KERN_INFO "PROBLEM in envcombo_read_hum\n");
 			if (ret >= 0) { *val = ret; ret = IIO_VAL_INT; }
 			break;
 		case IIO_CHAN_INFO_SCALE:
@@ -267,6 +283,7 @@ static int envcombo_read_raw(struct iio_dev *indio_dev,
 	}
 
 	iio_device_release_direct_mode(indio_dev);
+	printk(KERN_INFO "returning from read raw func\n");
 	return ret;
 }
 
@@ -323,9 +340,8 @@ static irqreturn_t envcombo_trigger_handler(int irq, void *p)
 	st->scan_buf[0] = cpu_to_le16(t);
 	st->scan_buf[1] = cpu_to_le16((u16)(h & 0xFF));
 
-	iio_push_to_buffers_with_timestamp(indio_dev,
-                                       st->scan_buf,
-                                       ktime_get_boottime_ns());
+	iio_push_to_buffers_with_timestamp(indio_dev, st->scan_buf,
+                                    ((struct iio_poll_func *)p)->timestamp);
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -365,6 +381,7 @@ static const struct iio_chan_spec envcombo_channels[] = {
 			.endianness = IIO_LE,
 		},
 	},
+	IIO_CHAN_SOFT_TIMESTAMP(2),
 };
 
 // Internal trigger ops
@@ -472,9 +489,12 @@ static int envcombo_probe(struct i2c_client *client,
 
 	// Triggered buffer
 	ret = devm_iio_triggered_buffer_setup(&client->dev, indio_dev,
-					      iio_pollfunc_store_time,
-					      envcombo_trigger_handler,
-					      NULL);
+                      iio_pollfunc_store_time,
+                      envcombo_trigger_handler,
+                      NULL);
+ /* Bind internal trigger so users don’t need to echo to current_trigger */
+	indio_dev->trig = iio_trigger_get(st->trig);
+
 	dev_info(&client->dev, "Triggered buffer setup ret=%d\n", ret);
 	if (ret) {
 		dev_err(&client->dev, "triggered buffer setup failed: %d\n", ret);

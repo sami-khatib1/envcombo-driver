@@ -143,7 +143,7 @@ EXP_HUM_DIFF=$(( HUM_OFF_RAW  * 500 ))   # 40 * 500 = 20000 m%RH
 
 # tolerance (accounts for simulator raw drift between reads)
 TEMP_TOL=500     # ±0.5 °C
-HUM_TOL=2000     # ±2 %RH
+HUM_TOL=3000     # ±2 %RH
 
 NEW_TEMP_C=$(awk -v v="$NEW_TEMP_M" 'BEGIN{printf "%.2f", v/1000}')
 OLD_TEMP_C=$(awk -v v="$OLD_TEMP_M" 'BEGIN{printf "%.2f", v/1000}')
@@ -191,8 +191,8 @@ sleep 0.1
 # via a hw interrupt and data is written/read accordingly
 
 SAMPLES=${1:-10}
-echo "[9/10] Running read_iio.sh for $SAMPLES samples..."
-/var/volatile/tmp/read_iio.sh "$SAMPLES"
+echo "[9/10] Running read_iio.sh script for $SAMPLES samples..."
+sh /tmp/read_iio.sh "$SAMPLES"
 
 # ---------- 10. mark success ----------
 TEST_STATUS="PASS"

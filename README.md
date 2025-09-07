@@ -63,7 +63,7 @@ From your host machine (not inside QEMU):
 ```bash
 scp driver/envcombo.ko root@192.168.7.2:/tmp/
 scp simulator/i2c-envcombo-sim.ko root@192.168.7.2:/tmp/
-scp scripts/test_envcombo.sh root@192.168.7.2:/tmp/
+scp scripts/* root@192.168.7.2:/tmp/
 ```
 
 ---
